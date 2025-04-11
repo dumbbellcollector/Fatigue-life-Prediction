@@ -1,1 +1,1 @@
-Weekly Updating the New Version of File
+Updated weekly with new versions of files.
