@@ -24,7 +24,7 @@ It combines simple tensile test properties with physical fatigue models to predi
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/yourusername/fatigue-life-predictor.git
+git clone https://github.com/dumbbellcollector/fatigue-life-predictor.git
 cd fatigue-life-predictor
 ```
 
@@ -58,7 +58,7 @@ streamlit run FatiguePredictor.py
 
 | Tensile Mode (ε–N) | Shear Mode (γ–N) |
 | :----------------: | :--------------: |
-| ![Tensile Curve Example](path/to/tensile_example.png) | ![Shear Curve Example](path/to/shear_example.png) |
+| ![Tensile Curve Example](tensile_example.png) | ![Shear Curve Example](shear_example.png) |
 
 ---
 
