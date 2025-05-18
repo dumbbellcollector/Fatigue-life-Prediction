@@ -264,7 +264,7 @@ def load_resources(model_path='best_fatigue_pinn_model.pth',
 # --- Streamlit App Layout ---
 st.set_page_config(layout="wide")
 st.title('Fatigue Life Predictor (ε-N / γ-N)')
-st.write("Enter Monotonic Properties and Select mode, Get Prediction.")
+st.write("모바일 사용자는 좌측 상단의 화살표를 눌러 입력창을 사용할 수 있습니다.")
 
 # 리소스 로드
 model, scaler_X, scalers_y_dict, device = load_resources() # scaler_y -> scalers_y_dict
