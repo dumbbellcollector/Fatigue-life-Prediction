@@ -92,6 +92,8 @@ streamlit run FatiguePredictor.py
 | 2025.04.11 | Migrated to PyTorch and initiated Streamlit-based GUI app development. |
 | 2025.04.14 | Extended model to predict both tensile and shear fatigue life (previously only tensile). |
 | 2025.04.27 | Improved prediction accuracy by grouping conversion based on TS; enhanced Streamlit app GUI. |
+| 2025.05.08 | Apply traditional fatigue parameter estimation methods to the loss function. Specifically, the hardness method(RF) and the universal slope method|
+| 2025.05.14 | Regress to the data-driven method used in previous versions due to low accuracy. |
 
 ---
 
