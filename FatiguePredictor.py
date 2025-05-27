@@ -449,7 +449,7 @@ with st.sidebar:
                 st.session_state.physics_params = temp_physics_params
                 st.session_state.shear_results = shear_calc_results
 
-                st.sidebar.success("예측 및 계산 완료!")
+                #st.sidebar.success("예측 및 계산 완료!")
 
             except FileNotFoundError as fe:
                 st.sidebar.error(f"필수 파일을 찾을 수 없습니다: {fe}.")
