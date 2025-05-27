@@ -363,7 +363,7 @@ def load_resources(model_path=MODEL_PATH, # 전역 상수 사용
     return model, scaler_X, scalers_y_dict, target_cols_list
 
 # --- Streamlit App Layout ---
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Fatigue Life Predictor")
 st.title('Fatigue Life Predictor (ε-N / γ-N)')
 st.write("Enter Monotonic Properties and Select mode, Get Prediction.")
 
