@@ -8,6 +8,9 @@ import os
 import pandas as pd
 import io # For image download
 
+# Import the new module
+import composition_to_properties as ctp
+
 # --- File Paths (Global Constants) ---
 # Attempt to determine script directory for robust pathing
 try:
@@ -24,15 +27,38 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.ba
 print(f"Streamlit App: Using device: {device}")
 
 # --- Input Validation Function ---
-def all_inputs_valid(e_mod, ys, ts, hb_input, poisson_ratio):
-    if e_mod is None or e_mod <= 0: return False
-    if ys is None or ys <= 0: return False
-    if ts is None or ts <= 0: return False
-    # HB can be 0 or None if not used for physics, but for prediction it's better to have a value.
-    # The predict_fatigue_curves_hybrid handles HB_val being None/nan, so direct check here might be optional
-    # depending on strictness. For now, let's assume it should be non-negative if provided.
-    if hb_input is not None and hb_input < 0: return False # Allow 0, but not negative
-    if poisson_ratio is None or not (0 <= poisson_ratio <= 0.5): return False
+def validate_monotonic_inputs(e_mod_gpa, ys_mpa, ts_mpa, hb_input, poisson_ratio):
+    error_messages = []
+    if e_mod_gpa is None or e_mod_gpa <= 0: error_messages.append("탄성 계수(E)는 0보다 커야 합니다 (GPa 단위).")
+    if ys_mpa is None or ys_mpa <= 0: error_messages.append("항복 강도(YS)는 0보다 커야 합니다 (MPa 단위).")
+    if ts_mpa is None or ts_mpa <= 0: error_messages.append("인장 강도(TS)는 0보다 커야 합니다 (MPa 단위).")
+    if hb_input is not None and hb_input < 0: error_messages.append("브리넬 경도(HB)는 음수일 수 없습니다.")
+    if poisson_ratio is None or not (0 <= poisson_ratio <= 0.5): error_messages.append("포아송 비(ν)는 0.0에서 0.5 사이여야 합니다.")
+    
+    if ys_mpa is not None and ts_mpa is not None and ys_mpa > ts_mpa and ys_mpa > 0 and ts_mpa > 0 :
+        st.sidebar.warning("경고: 항복 강도(YS)가 인장 강도(TS)보다 큽니다. 입력값을 확인하세요.")
+
+    if error_messages:
+        for msg in error_messages:
+            st.sidebar.error(msg)
+        return False
+    return True
+
+def validate_composition_inputs(composition: dict):
+    error_messages = []
+    for element, value in composition.items():
+        if value is None or value < 0: # Also check for None
+            error_messages.append(f"{element}의 조성비는 0 이상이어야 합니다.")
+    
+    # Optional: Check sum, but usually Fe is balance
+    # total_comp = sum(v for v in composition.values() if v is not None)
+    # if total_comp > 100:
+    #     error_messages.append(f"입력된 조성의 합계({total_comp:.2f} wt%)가 100 wt%를 초과합니다.")
+
+    if error_messages:
+        for msg in error_messages:
+            st.sidebar.error(msg)
+        return False
     return True
 
 # --- main.ipynb의 inverse_transform_targets 함수 ---
@@ -42,15 +68,14 @@ def inverse_transform_targets(y_scaled_data, scalers_y_dict, target_cols_list):
         
     y_transformed_individually = np.zeros_like(y_scaled_data)
     for i, col_name in enumerate(target_cols_list):
-        if col_name not in scalers_y_dict: # 키 존재 여부 확인
+        if col_name not in scalers_y_dict: 
             raise KeyError(f"Scaler for target '{col_name}' not found in scalers_y_dict. Available keys: {list(scalers_y_dict.keys())}")
         y_transformed_individually[:, i] = scalers_y_dict[col_name].inverse_transform(y_scaled_data[:, i].reshape(-1, 1)).flatten()
     
     y_orig_scale = y_transformed_individually.copy()
     
-    # Cell 6의 기준에 따라, 로그 변환된 컬럼 이름은 'epf'로 가정합니다.
     log_col_expected_name = 'epf' 
-    fallback_log_col_name = 'epf_log' # 혹시 'epf_log'로 저장된 pkl을 위한 대체 경로
+    fallback_log_col_name = 'epf_log'
 
     if log_col_expected_name in target_cols_list:
         try:
@@ -58,11 +83,11 @@ def inverse_transform_targets(y_scaled_data, scalers_y_dict, target_cols_list):
             y_orig_scale[:, current_log_col_idx] = np.expm1(y_transformed_individually[:, current_log_col_idx])
         except ValueError:
             st.warning(f"'{log_col_expected_name}' was in target_cols_list but index could not be found. Skipping expm1 transformation for it.")
-    elif fallback_log_col_name in target_cols_list: # 'epf'가 없고 'epf_log'가 있는 경우
+    elif fallback_log_col_name in target_cols_list: 
         try:
             current_fallback_log_col_idx = target_cols_list.index(fallback_log_col_name)
             st.info(f"Note: Found '{fallback_log_col_name}' in target_cols and applying expm1. "
-                    f"The primary expected log-column name (based on notebook Cell 6 assumption) is '{log_col_expected_name}'.")
+                    f"The primary expected log-column name is '{log_col_expected_name}'.")
             y_orig_scale[:, current_fallback_log_col_idx] = np.expm1(y_transformed_individually[:, current_fallback_log_col_idx])
         except ValueError:
             st.warning(f"'{fallback_log_col_name}' was in target_cols_list but index could not be found. Skipping expm1 transformation for it.")
@@ -77,14 +102,13 @@ class FatiguePINN(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.dropout_p = dropout_p # 드롭아웃 비율 저장
+        self.dropout_p = dropout_p 
 
         layers = []
         last_dim = input_dim
         for i, hidden_dim in enumerate(hidden_dims):
             layers.append(nn.Linear(last_dim, hidden_dim))
             layers.append(nn.ReLU())
-            # 드롭아웃 레이어 추가
             if self.dropout_p > 0:
                 layers.append(nn.Dropout(p=self.dropout_p))
             last_dim = hidden_dim
@@ -99,23 +123,20 @@ class FatiguePINN(nn.Module):
 HB_CLASS1_MAX = 150; HB_CLASS2_MAX = 500; HB_CLASS3_MAX = 700
 
 def modified_universal_slopes(ts_mpa, e_mpa):
-    """Modified Universal Slopes Method"""
     spf = 1.9 * ts_mpa
     epf = 0.623 * (ts_mpa / e_mpa) ** 0.832
     return spf, epf
 
 def uniform_material_law(ts_mpa, e_mpa):
-    """Uniform Material Law"""
-    if ts_mpa < 750:  # Low strength steel
+    if ts_mpa < 750:
         spf = 1.5 * ts_mpa
         epf = 0.59 * (ts_mpa / e_mpa) ** 0.58
-    else:  # High strength steel
+    else:
         spf = 1.67 * ts_mpa
         epf = 0.35
     return spf, epf
 
 def hardness_method(hb, ts_mpa, e_mpa):
-    """Hardness Method"""
     spf = 4.25 * hb + 225
     epf = 0.32 * (hb / 1000) ** (-1.24)
     return spf, epf
@@ -124,24 +145,20 @@ method_map = {1: hardness_method, 2: hardness_method, 3: hardness_method, 4: har
 method_names = {1: "Hardness Method", 2: "Hardness Method", 3: "Hardness Method", 4: "Hardness Method"}
 
 def get_physics_params(hb_val, ts_mpa_val, e_mpa_val):
-    """Get physics-based parameters based on material class"""
     method_name = "Unknown"
     spf_physics = epf_physics = None
     
-    if hb_val <= 0 or np.isnan(hb_val):
-        return np.nan, np.nan, "Invalid HB value"
+    if hb_val is None or hb_val <= 0 or np.isnan(hb_val):
+        return np.nan, np.nan, "유효한 HB 값이 없어 물리 기반 계산 불가"
     
-    # Determine material class based on HB
-    if hb_val <= HB_CLASS1_MAX:
-        material_class = 1
-    elif hb_val <= HB_CLASS2_MAX:
-        material_class = 2
-    elif hb_val <= HB_CLASS3_MAX:
-        material_class = 3
-    else:
-        material_class = 4
+    if ts_mpa_val is None or e_mpa_val is None or ts_mpa_val <=0 or e_mpa_val <=0: # Added check for TS, E
+        return np.nan, np.nan, "TS 또는 E 값이 유효하지 않아 물리 기반 계산 불가"
+
+    if hb_val <= HB_CLASS1_MAX: material_class = 1
+    elif hb_val <= HB_CLASS2_MAX: material_class = 2
+    elif hb_val <= HB_CLASS3_MAX: material_class = 3
+    else: material_class = 4
     
-    # Get method function and name
     method_func = method_map.get(material_class)
     method_name = method_names.get(material_class, "Unknown")
     
@@ -149,12 +166,20 @@ def get_physics_params(hb_val, ts_mpa_val, e_mpa_val):
         try:
             spf_physics, epf_physics = method_func(hb_val, ts_mpa_val, e_mpa_val)
         except Exception as e:
-            return np.nan, np.nan, f"Error in {method_name}: {str(e)}"
+            return np.nan, np.nan, f"{method_name} 계산 중 오류: {str(e)}"
     
     return spf_physics, epf_physics, method_name
 
 # --- Helper function for Shear Conversion (New) ---
 def convert_to_shear_parameters(spf_prime, b_fatigue, epf_prime, c_fatigue, E_gpa, TS_mpa, nu=0.3):
+    # Ensure all inputs are valid numbers before proceeding
+    if any(val is None or np.isnan(val) for val in [spf_prime, b_fatigue, epf_prime, c_fatigue, E_gpa, TS_mpa, nu]):
+        st.warning("전단 변환에 필요한 일부 파라미터가 유효하지 않습니다. (NaN 또는 None)")
+        return { # Return a structure with NaNs to prevent downstream errors
+            'tauf_MPa': np.nan, 'gammaf': np.nan, 'b0': np.nan, 'c0': np.nan,
+            'conversion_method': "입력 파라미터 부족/무효", 'G_mpa': np.nan
+        }
+
     tau_vm = spf_prime / np.sqrt(3)
     gamma_vm = np.sqrt(3) * epf_prime
     
@@ -165,42 +190,55 @@ def convert_to_shear_parameters(spf_prime, b_fatigue, epf_prime, c_fatigue, E_gp
     c0 = c_fatigue
 
     conversion_method = "Unknown"
-    tauf_prime, gammaf_prime = np.nan, np.nan
+    tauf_prime_calc, gammaf_prime_calc = np.nan, np.nan # Renamed to avoid conflict
 
     if TS_mpa <= 1100:
-        tauf_prime, gammaf_prime = tau_vm, gamma_vm
+        tauf_prime_calc, gammaf_prime_calc = tau_vm, gamma_vm
         conversion_method = "von Mises Criteria"
     elif TS_mpa >= 1696:
-        tauf_prime, gammaf_prime = tau_mp, gamma_mp
+        tauf_prime_calc, gammaf_prime_calc = tau_mp, gamma_mp
         conversion_method = "Maximum Principal Stress/Strain Criteria"
     else:
         alpha = (TS_mpa - 1100) / (1696 - 1100)
-        tauf_prime = (1 - alpha) * tau_vm + alpha * tau_mp
-        gammaf_prime = (1 - alpha) * gamma_vm + alpha * gamma_mp
+        tauf_prime_calc = (1 - alpha) * tau_vm + alpha * tau_mp
+        gammaf_prime_calc = (1 - alpha) * gamma_vm + alpha * gamma_mp
         conversion_method = f"Interpolated (von Mises to Max Principal, α={alpha:.2f})"
 
+    E_mpa_internal = E_gpa * 1000
+    G_mpa_internal = E_mpa_internal / (2 * (1 + nu)) if E_mpa_internal > 0 and nu is not None else np.nan
+
     shear_params = {
-        'tauf_MPa': tauf_prime,
-        'gammaf': gammaf_prime,
+        'tauf_MPa': tauf_prime_calc,
+        'gammaf': gammaf_prime_calc,
         'b0': b0,
         'c0': c0,
-        'conversion_method': conversion_method
+        'conversion_method': conversion_method,
+        'G_mpa': G_mpa_internal
     }
     return shear_params
 
 # --- Hybrid Model Prediction and Curve Generation (Modified) ---
 def predict_fatigue_curves_hybrid(E_val_gpa, YS_val_mpa, TS_val_mpa, HB_val, model, scaler_X, 
                                   scalers_y_dict, target_cols_list,
-                                  device, nu=0.3): 
+                                  device): 
     
+    if any(v is None for v in [E_val_gpa, YS_val_mpa, TS_val_mpa]): # HB_val can be None
+        raise ValueError("E, YS, TS 값은 반드시 제공되어야 합니다.")
+
     E_val_mpa = E_val_gpa * 1000 
 
     hb_processed_val = HB_val
-    if HB_val is None or np.isnan(HB_val):
-        if TS_val_mpa is not None and not np.isnan(TS_val_mpa):
+    if HB_val is None or np.isnan(HB_val) or HB_val <= 0: # Added HB_val <= 0
+        if TS_val_mpa is not None and not np.isnan(TS_val_mpa) and TS_val_mpa > 0:
             hb_processed_val = 1.8 * TS_val_mpa + 105 
+            st.sidebar.info(f"HB값이 제공되지 않거나 유효하지 않아 TS ({TS_val_mpa} MPa)로부터 추정된 HB ({hb_processed_val:.1f})를 사용합니다.")
         else: 
-             raise ValueError("HB 값과 TS_MPa 값 모두 제공되지 않아 HB_processed를 계산할 수 없습니다.")
+             raise ValueError("HB 값과 TS_MPa 값 모두 유효하지 않아 HB_processed를 계산할 수 없습니다.")
+    
+    # Ensure all features for model are valid numbers
+    if any(np.isnan(v) or v is None for v in [E_val_mpa, YS_val_mpa, TS_val_mpa, hb_processed_val]):
+        raise ValueError(f"모델 입력 특징 중 유효하지 않은 값이 있습니다: E={E_val_mpa}, YS={YS_val_mpa}, TS={TS_val_mpa}, HB_proc={hb_processed_val}")
+
 
     features_np = np.array([[E_val_mpa, YS_val_mpa, TS_val_mpa, hb_processed_val]], dtype=np.float32)
     
@@ -224,11 +262,9 @@ def predict_fatigue_curves_hybrid(E_val_gpa, YS_val_mpa, TS_val_mpa, HB_val, mod
     sigma_f_prime = params_dict.get('spf_MPa')
     b_fatigue = params_dict.get('b')
 
-    # Cell 6 기준: 'epf'가 로그 변환된 컬럼의 이름으로 params_dict에 키로 존재
-    # inverse_transform_targets 함수가 이미 해당 컬럼에 대해 np.expm1을 적용했음.
-    if 'epf' in params_dict: # 노트북 Cell 6의 pkl 저장 기준
+    if 'epf' in params_dict:
         epsilon_f_prime = params_dict.get('epf')
-    elif 'epf_log' in params_dict: # 'epf_log'로 저장된 pkl을 위한 대체 경로
+    elif 'epf_log' in params_dict:
         epsilon_f_prime = params_dict.get('epf_log')
     else:
         epsilon_f_prime = None 
@@ -236,15 +272,12 @@ def predict_fatigue_curves_hybrid(E_val_gpa, YS_val_mpa, TS_val_mpa, HB_val, mod
     c_fatigue = params_dict.get('c')
 
     if sigma_f_prime is None or b_fatigue is None or epsilon_f_prime is None or c_fatigue is None:
-        # 오류 메시지에서 'epf_log/epf' 대신, 실제로 찾으려고 시도한 키를 명시하는 것이 더 정확할 수 있음
-        # 예를 들어, target_cols_list에 있는 epf 관련 키 ('epf' 또는 'epf_log')를 사용
         epf_key_in_list = 'epf' if 'epf' in target_cols_list else 'epf_log' if 'epf_log' in target_cols_list else 'epf/epf_log'
         missing_keys = [key for key, val in zip(['spf_MPa', 'b', epf_key_in_list, 'c'], 
                                                [sigma_f_prime, b_fatigue, epsilon_f_prime, c_fatigue]) if val is None]
         raise ValueError(f"모델 예측에서 다음 필수 파라미터들을 얻을 수 없습니다: {missing_keys}. "
                          f"사용된 target_cols_list: {target_cols_list}, params_dict에 있는 키: {list(params_dict.keys())}")
 
-    # E-N Curve (Tensile)
     Nf = np.logspace(1, 7, 100) 
     delta_epsilon_el_half = (sigma_f_prime / E_val_mpa) * (2 * Nf)**b_fatigue
     delta_epsilon_pl_half = epsilon_f_prime * (2 * Nf)**c_fatigue
@@ -261,50 +294,36 @@ def predict_fatigue_curves_hybrid(E_val_gpa, YS_val_mpa, TS_val_mpa, HB_val, mod
         "b_fatigue": b_fatigue,
         "epsilon_f_prime": epsilon_f_prime,
         "c_fatigue": c_fatigue,
-        "E_mpa": E_val_mpa
+        "E_mpa": E_val_mpa, 
+        "HB_processed_for_prediction": hb_processed_val
     }
     return results
 
 # --- Load Model and Scalers ---
 @st.cache_resource
-def load_resources(model_path=MODEL_PATH, # 전역 상수 사용
-                   scaler_x_path=SCALER_X_PATH, # 전역 상수 사용
-                   scaler_y_path=SCALER_Y_PATH): # 전역 상수 사용
-    # 모델 로드
+def load_resources(model_path=MODEL_PATH, scaler_x_path=SCALER_X_PATH, scaler_y_path=SCALER_Y_PATH):
     model_hidden_dims = [192, 384, 352, 224]
     model_dropout_p = 0.35
     input_dim = 4 
     output_dim = 4 
 
-    model = FatiguePINN(input_dim=input_dim, 
-                        output_dim=output_dim, 
-                        hidden_dims=model_hidden_dims, 
-                        dropout_p=model_dropout_p)
+    model = FatiguePINN(input_dim=input_dim, output_dim=output_dim, 
+                        hidden_dims=model_hidden_dims, dropout_p=model_dropout_p)
     
-    # 전역 device 변수 사용
     _device = device 
 
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-    if not os.path.exists(scaler_x_path):
-        raise FileNotFoundError(f"Scaler X file not found: {scaler_x_path}")
-    if not os.path.exists(scaler_y_path):
-        raise FileNotFoundError(f"Scaler Y file not found: {scaler_y_path}")
+    if not os.path.exists(model_path): raise FileNotFoundError(f"Model file not found: {model_path}")
+    if not os.path.exists(scaler_x_path): raise FileNotFoundError(f"Scaler X file not found: {scaler_x_path}")
+    if not os.path.exists(scaler_y_path): raise FileNotFoundError(f"Scaler Y file not found: {scaler_y_path}")
 
-    if torch.cuda.is_available() and _device.type == 'cuda':
-        model.load_state_dict(torch.load(model_path))
-    elif torch.backends.mps.is_available() and _device.type == 'mps':
-        model.load_state_dict(torch.load(model_path, map_location='mps'))
-    else:
-        model.load_state_dict(torch.load(model_path, map_location='cpu'))
+    map_location = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    model.load_state_dict(torch.load(model_path, map_location=map_location))
     model.to(_device)
     model.eval()
 
     scaler_X = joblib.load(scaler_x_path)
-    
     data_y = joblib.load(scaler_y_path)
     
-    # Cell 6 기준: pkl 파일은 'epf'를 로그 변환된 컬럼명으로 저장한다고 가정
     expected_cols_for_model = ['spf_MPa', 'b', 'epf', 'c'] 
 
     if isinstance(data_y, dict) and 'scalers' in data_y and 'target_cols' in data_y:
@@ -312,52 +331,35 @@ def load_resources(model_path=MODEL_PATH, # 전역 상수 사용
         target_cols_list = data_y['target_cols']
         
         if set(target_cols_list) != set(expected_cols_for_model):
-            # 순서는 다를 수 있으나, 포함된 이름 자체가 다른 경우 경고
-            # 특히 'epf' 대신 'epf_log'가 있거나 그 반대인 경우를 감지하여 안내
-            if 'epf' in target_cols_list and 'epf_log' not in target_cols_list and 'epf_log' in expected_cols_for_model:
-                 # 이 경우는 expected_cols_for_model이 'epf_log'를 기대했으나 실제로는 'epf'만 있을 때 (현재 로직상 발생 안 함)
-                 pass 
-            elif 'epf_log' in target_cols_list and 'epf' not in target_cols_list and 'epf' in expected_cols_for_model:
-                # 실제 pkl에 'epf_log'가 있고, 우리는 'epf'를 기대하는 경우 (Cell 6 기준과 반대)
+            if 'epf_log' in target_cols_list and 'epf' not in target_cols_list and 'epf' in expected_cols_for_model:
                 st.warning(
                     f"경고: 로드된 target_cols ({target_cols_list})에 'epf_log'가 포함되어 있습니다. "
-                    f"현재 앱은 노트북 Cell 6 기준에 따라 '{expected_cols_for_model}' (즉, 'epf')를 기대합니다. "
-                    f"inverse_transform_targets 함수에서 'epf_log'를 대체 처리하려고 시도하지만, "
-                    f"정확한 작동을 위해 노트북에서 target_cols에 'epf'를 사용하고 scalers_y.pkl을 재생성하는 것을 권장합니다."
+                    f"앱은 '{expected_cols_for_model}' ('epf')를 기대합니다. 'epf_log'를 대체 처리합니다."
                 )
-            else: # 그 외 일반적인 이름 불일치
+            else:
                  st.warning(
                     f"경고: 로드된 target_cols ({target_cols_list})가 예상 기본값 ({expected_cols_for_model})과 다릅니다. "
-                    f"로드된 값을 사용하나, 예상치 못한 동작이 발생할 수 있습니다. 노트북의 scalers_y.pkl 저장 부분을 확인하세요."
+                    f"로드된 값을 사용하나, 예상치 못한 동작이 발생할 수 있습니다."
                 )
-        # 순서 일치 여부도 중요할 수 있으므로, 리스트 직접 비교도 고려 (선택적)
         if target_cols_list != expected_cols_for_model and set(target_cols_list) == set(expected_cols_for_model):
             st.info(f"로드된 target_cols ({target_cols_list})의 순서가 예상된 순서 ({expected_cols_for_model})와 다릅니다. 이름은 일치하므로 계속 진행합니다.")
 
         missing_scalers = [col for col in target_cols_list if col not in scalers_y_dict]
         if missing_scalers:
-            raise ValueError(f"'{scaler_y_path}' 파일의 'scalers' 딕셔너리에 다음 타겟 컬럼에 대한 스케일러가 없습니다: {missing_scalers}. "
-                             f"'target_cols'는 {target_cols_list} 입니다.")
+            raise ValueError(f"'{scaler_y_path}'의 'scalers'에 다음 타겟 컬럼 스케일러가 없습니다: {missing_scalers}.")
 
     elif isinstance(data_y, dict):
-        st.warning(f"경고: '{scaler_y_path}' 파일이 이전 형식으로 보입니다 (스케일러 딕셔너리만 포함). "
-                   f"'target_cols' 정보가 없어 모델 학습 시 예상되는 기본값 {expected_cols_for_model}을 사용합니다. "
-                   f"정확한 작동을 위해 노트북에서 'scalers_y.pkl' 저장 방식을 {'{'}'scalers': ..., 'target_cols': ...{'}'} 형태로 업데이트하고, "
-                   f"target_cols를 '{expected_cols_for_model}'로 저장하는 것을 강력히 권장합니다.")
+        st.warning(f"경고: '{scaler_y_path}' 파일이 이전 형식입니다. 기본 타겟 컬럼 {expected_cols_for_model}을 사용합니다.")
         scalers_y_dict = data_y 
         target_cols_list = expected_cols_for_model 
         missing_keys_in_scaler = [key for key in target_cols_list if key not in scalers_y_dict]
         if missing_keys_in_scaler:
-            raise ValueError(f"이전 형식의 '{scaler_y_path}' 파일에서 로드된 스케일러 딕셔너리에 "
-                             f"예상되는 기본 타겟 컬럼({expected_cols_for_model})에 대한 키가 없습니다. "
-                             f"누락된 키: {missing_keys_in_scaler}")
+            raise ValueError(f"이전 형식 '{scaler_y_path}' 파일의 스케일러에 누락된 키: {missing_keys_in_scaler}")
     else:
-        raise ValueError(f"'{scaler_y_path}' 파일의 형식을 인식할 수 없습니다. "
-                         f"{'{'}'scalers': ..., 'target_cols': ...{'}'} 형식 또는 스케일러 딕셔너리 형식을 기대합니다.")
+        raise ValueError(f"'{scaler_y_path}' 파일 형식을 인식할 수 없습니다.")
 
     if model.output_dim != len(target_cols_list):
-        st.error(f"모델의 출력 차원({model.output_dim})과 로드/결정된 타겟 컬럼의 수({len(target_cols_list)})가 일치하지 않습니다. "
-                 f"모델 아키텍처 또는 'scalers_y.pkl' 파일의 'target_cols'를 확인하세요. 사용된 타겟 컬럼: {target_cols_list}")
+        st.error(f"모델 출력 차원({model.output_dim})과 타겟 컬럼 수({len(target_cols_list)}) 불일치. 타겟: {target_cols_list}")
         raise ValueError("Model output dimension and target columns mismatch.")
         
     return model, scaler_X, scalers_y_dict, target_cols_list
@@ -365,231 +367,305 @@ def load_resources(model_path=MODEL_PATH, # 전역 상수 사용
 # --- Streamlit App Layout ---
 st.set_page_config(layout="wide", page_title="Fatigue Life Predictor")
 st.title('Fatigue Life Predictor (ε-N / γ-N)')
-st.write("Enter Monotonic Properties and Select mode, Get Prediction.")
+st.write("Enter Monotonic Properties or Alloy Composition, Get Prediction.")
 
 # --- Session State 초기화 ---
-if 'prediction_triggered' not in st.session_state:
-    st.session_state.prediction_triggered = False
-if 'user_inputs' not in st.session_state:
-    st.session_state.user_inputs = {}
-if 'en_results' not in st.session_state:
-    st.session_state.en_results = None
-if 'shear_results' not in st.session_state:
-    st.session_state.shear_results = None
-if 'physics_params' not in st.session_state:
-    st.session_state.physics_params = None
-if 'current_prediction_mode' not in st.session_state:
-    st.session_state.current_prediction_mode = 'tensile'
+if 'prediction_triggered' not in st.session_state: st.session_state.prediction_triggered = False
+if 'user_inputs' not in st.session_state: st.session_state.user_inputs = {}
+if 'en_results' not in st.session_state: st.session_state.en_results = None
+if 'shear_results' not in st.session_state: st.session_state.shear_results = None
+if 'physics_params' not in st.session_state: st.session_state.physics_params = None
+if 'input_mode' not in st.session_state: st.session_state.input_mode = "단조 물성치 직접 입력"
+if 'poisson_ratio_universal' not in st.session_state: st.session_state.poisson_ratio_universal = 0.3 # 공용 포아송 비 초기화
 
 # 리소스 로드 (앱 시작 시 한 번)
-model, scaler_X, scalers_y_dict, target_cols_list = load_resources()
+try:
+    model, scaler_X, scalers_y_dict, target_cols_list = load_resources()
+except FileNotFoundError as e:
+    st.error(f"필수 파일 로드 실패: {e}. 앱을 실행할 수 없습니다.")
+    st.stop()
+except ValueError as e:
+    st.error(f"데이터 파일 형식 또는 내용 오류: {e}. 앱을 실행할 수 없습니다.")
+    st.stop()
+except Exception as e:
+    st.error(f"알 수 없는 오류로 리소스 로드 실패: {e}")
+    st.stop()
 
-if model is None: st.stop()
+
+# Define elements for composition input globally for access
+elements_for_input_definition = {
+    'C': {'label': 'C (탄소)', 'default': 0.2, 'format': '%.3f', 'step': 0.001},
+    'Mn': {'label': 'Mn (망간)', 'default': 0.8, 'format': '%.3f', 'step': 0.01},
+    'Si': {'label': 'Si (규소)', 'default': 0.3, 'format': '%.3f', 'step': 0.01},
+    'Cr': {'label': 'Cr (크롬)', 'default': 0.0, 'format': '%.3f', 'step': 0.01},
+    'Mo': {'label': 'Mo (몰리브덴)', 'default': 0.0, 'format': '%.3f', 'step': 0.01},
+    'Ni': {'label': 'Ni (니켈)', 'default': 0.0, 'format': '%.3f', 'step': 0.01},
+    'V': {'label': 'V (바나듐)', 'default': 0.0, 'format': '%.3f', 'step': 0.001},
+    'Nb': {'label': 'Nb (니오븀)', 'default': 0.0, 'format': '%.4f', 'step': 0.0001},
+    'Ti': {'label': 'Ti (티타늄)', 'default': 0.0, 'format': '%.4f', 'step': 0.0001},
+    'Al': {'label': 'Al (알루미늄)', 'default': 0.0, 'format': '%.3f', 'step': 0.001},
+    'N': {'label': 'N (질소)', 'default': 0.0, 'format': '%.4f', 'step': 0.0001},
+    'Cu': {'label': 'Cu (구리)', 'default': 0.0, 'format': '%.3f', 'step': 0.01},
+    'P': {'label': 'P (인)', 'default': 0.015, 'format': '%.4f', 'step': 0.001},
+    'S': {'label': 'S (황)', 'default': 0.015, 'format': '%.4f', 'step': 0.001},
+    'B': {'label': 'B (붕소)', 'default': 0.0, 'format': '%.5f', 'step': 0.00001}
+}
 
 # 사이드바에 입력 섹션 배치
 with st.sidebar:
-    st.header("입력 파라미터")
-    st.subheader("재료 특성")
-    e_mod_gpa_input = st.number_input('탄성 계수 (E, GPa)', min_value=1.0, value=200.0, format='%.1f', help="GPa 단위로 입력하세요. (예: 강철 약 200 GPa)")
-    ys_mpa_input = st.number_input('항복 강도 (YS, MPa)', min_value=1.0, value=500.0, format='%.1f')
-    ts_mpa_input = st.number_input('인장 강도 (UTS, MPa)', min_value=1.0, value=700.0, format='%.1f')
-    hb_input_val = st.number_input('브리넬 경도 (HB)', min_value=0.0, value=200.0, format='%.1f', help="물리 기반 spf/epf 계산에 필요합니다.")
-    poisson_ratio_input = st.number_input("포아송 비 (ν)", min_value=0.0, max_value=0.5, value=0.3, step=0.01, format='%.2f', help="전단 계산에 사용됩니다")
+    st.header("입력 모드 및 파라미터")
 
-    if hb_input_val <= 0:
-         st.warning("유효한 HB 값을 입력하세요. HB 값이 0 이하이면 물리 기반 경험식 계산 및 일부 예측 정확도에 영향을 줄 수 있습니다.")
+    st.radio(
+        "입력 방식 선택:",
+        ("단조 물성치 직접 입력", "합금 조성비 입력 (wt%)"),
+        key='input_mode',
+        horizontal=True,
+        on_change=lambda: setattr(st.session_state, 'prediction_triggered', False)
+    )
+
+    if st.session_state.input_mode == "단조 물성치 직접 입력":
+        st.subheader("재료 특성 (직접 입력)")
+        e_mod_gpa_direct_input = st.number_input('탄성 계수 (E, GPa)', min_value=1.0, value=200.0, format='%.1f', help="GPa 단위. (예: 강철 ~200 GPa)", key="e_mod_gpa_direct")
+        ys_mpa_direct_input = st.number_input('항복 강도 (YS, MPa)', min_value=1.0, value=500.0, format='%.1f', key="ys_mpa_direct")
+        ts_mpa_direct_input = st.number_input('인장 강도 (UTS, MPa)', min_value=1.0, value=700.0, format='%.1f', key="ts_mpa_direct")
+        hb_direct_input_val = st.number_input('브리넬 경도 (HB)', min_value=0.0, value=200.0, format='%.1f', help="물리 기반 계산 및 모델 입력용. 0 입력 시 TS로부터 추정.", key="hb_direct")
+        poisson_direct_input = st.number_input("포아송 비 (ν)", min_value=0.0, max_value=0.5, value=0.3, step=0.01, format='%.2f', help="전단 계산에 사용.", key="poisson_direct")
+
+        if hb_direct_input_val is not None and hb_direct_input_val <= 0:
+             st.info("HB 값이 0 이하로 입력되어 인장강도(TS)로부터 HB를 추정하여 사용합니다 (모델 입력 및 물리식 계산 시).")
+
+    elif st.session_state.input_mode == "합금 조성비 입력 (wt%)":
+        st.subheader("합금 조성 (wt%)")
+        
+        col1_comp, col2_comp = st.columns(2)
+        element_keys_col1 = list(elements_for_input_definition.keys())[:8]
+        
+        for el_key, props in elements_for_input_definition.items():
+            target_col = col1_comp if el_key in element_keys_col1 else col2_comp
+            with target_col:
+                st.number_input(
+                    props['label'], min_value=0.0, value=props['default'], 
+                    format=props['format'], step=props['step'], key=f"comp_{el_key}"
+                )
+        
+        current_composition_sum = sum(st.session_state[f"comp_{el}"] for el in elements_for_input_definition if f"comp_{el}" in st.session_state)
+        st.caption(f"입력된 조성의 합계: {current_composition_sum:.3f} wt%. (Fe는 잔량으로 간주)")
 
     if st.button("피로 거동 예측 실행", use_container_width=True, type="primary"):
         st.session_state.prediction_triggered = True
+        st.session_state.en_results = None
+        st.session_state.shear_results = None
+        st.session_state.physics_params = None
+        st.session_state.user_inputs = {}
+
+        # Initialize common variables for prediction
+        e_gpa_to_use, ys_mpa_to_use, ts_mpa_to_use, hb_to_use, nu_to_use = None, None, None, None, None
+        input_mode_str = st.session_state.input_mode
         
-        if not all_inputs_valid(e_mod_gpa_input * 1000, ys_mpa_input, ts_mpa_input, hb_input_val, poisson_ratio_input):
-            st.error("모든 필수 입력값을 올바르게 입력해주세요. (E, YS, UTS > 0, 0 <= ν <= 0.5)")
-            st.session_state.en_results = None 
-            st.session_state.shear_results = None
-            st.session_state.physics_params = None
-        else:
-            try:
-                e_mod_mpa_for_calc = e_mod_gpa_input * 1000 # 내부 계산용 MPa 값
-                temp_user_inputs = {
-                    'E_gpa': e_mod_gpa_input, # GPa로 저장 (사용자 입력값)
-                    'E_mpa': e_mod_mpa_for_calc, # MPa로 저장 (계산용)
-                    'YS_mpa': ys_mpa_input, 'TS_mpa': ts_mpa_input,
-                    'HB': hb_input_val, 'nu': poisson_ratio_input
-                }
-                current_target_cols = target_cols_list 
-                hb_to_pass = hb_input_val if hb_input_val is not None and hb_input_val > 0 else np.nan
-
-                predicted_en_results = predict_fatigue_curves_hybrid(
-                    e_mod_gpa_input, ys_mpa_input, ts_mpa_input, hb_to_pass, 
-                    model, scaler_X, scalers_y_dict, 
-                    current_target_cols, device
-                )
+        try:
+            if st.session_state.input_mode == "단조 물성치 직접 입력":
+                e_gpa_to_use = st.session_state.e_mod_gpa_direct
+                ys_mpa_to_use = st.session_state.ys_mpa_direct
+                ts_mpa_to_use = st.session_state.ts_mpa_direct
+                hb_to_use = st.session_state.hb_direct
+                nu_to_use = st.session_state.poisson_direct
                 
-                spf_phys, epf_phys, phys_method_name = get_physics_params(
-                    hb_input_val if hb_input_val > 0 else np.nan, 
-                    ts_mpa_input,
-                    e_mod_mpa_for_calc # get_physics_params는 MPa 단위 E를 받음
-                )
-                temp_physics_params = {
-                    'spf_MPa_phys': spf_phys, 'epf_phys': epf_phys, 'method_name': phys_method_name
+                if not validate_monotonic_inputs(e_gpa_to_use, ys_mpa_to_use, ts_mpa_to_use, hb_to_use, nu_to_use):
+                    raise ValueError("직접 입력된 재료 물성치 유효성 검사 실패.")
+                
+                st.session_state.user_inputs = {
+                    'E_gpa': e_gpa_to_use, 'YS_mpa': ys_mpa_to_use, 'TS_mpa': ts_mpa_to_use,
+                    'HB': hb_to_use, 'nu': nu_to_use, 'Input_Mode': input_mode_str
                 }
 
-                shear_calc_results = convert_to_shear_parameters(
-                    spf_prime=predicted_en_results['sigma_f_prime'],
-                    b_fatigue=predicted_en_results['b_fatigue'],
-                    epf_prime=predicted_en_results['epsilon_f_prime'],
-                    c_fatigue=predicted_en_results['c_fatigue'],
-                    E_gpa=e_mod_gpa_input, TS_mpa=ts_mpa_input, nu=poisson_ratio_input 
-                )
-                G_mpa_calc = (predicted_en_results['E_mpa']) / (2 * (1 + poisson_ratio_input))
-                shear_calc_results['G_mpa'] = G_mpa_calc
+            elif st.session_state.input_mode == "합금 조성비 입력 (wt%)":
+                current_composition = {el: st.session_state[f"comp_{el}"] for el in elements_for_input_definition}
                 
-                st.session_state.user_inputs = temp_user_inputs
-                st.session_state.en_results = predicted_en_results
-                st.session_state.physics_params = temp_physics_params
-                st.session_state.shear_results = shear_calc_results
+                if not validate_composition_inputs(current_composition):
+                    raise ValueError("입력된 합금 조성 유효성 검사 실패.")
 
-                #st.sidebar.success("예측 및 계산 완료!")
+                # e_gpa_to_use는 예측값을 사용하고, nu_to_use는 공용 값을 사용
+                predicted_props = ctp.calculate_monotonic_properties(current_composition)
+                e_gpa_to_use = predicted_props.get('E_gpa') 
+                ys_mpa_to_use = predicted_props.get('YS_mpa')
+                ts_mpa_to_use = predicted_props.get('TS_mpa')
+                hb_to_use = predicted_props.get('HB') # Can be None or NaN
+                nu_to_use = st.session_state.poisson_ratio_universal # 공용 포아송 비 사용
 
-            except FileNotFoundError as fe:
-                st.sidebar.error(f"필수 파일을 찾을 수 없습니다: {fe}.")
-                st.session_state.en_results = None
-                st.session_state.shear_results = None
-                st.session_state.physics_params = None
-            except ValueError as ve:
-                st.sidebar.error(f"입력값 또는 데이터 처리 중 오류: {ve}")
-                st.session_state.en_results = None
-                st.session_state.shear_results = None
-                st.session_state.physics_params = None
-            except Exception as e:
-                st.sidebar.error(f"예측 중 예기치 않은 오류: {e}")
-                st.session_state.en_results = None
-                st.session_state.shear_results = None
-                st.session_state.physics_params = None
+                if not validate_monotonic_inputs(e_gpa_to_use, ys_mpa_to_use, ts_mpa_to_use, hb_to_use, nu_to_use):
+                    raise ValueError("조성으로부터 예측/입력된 물성치 유효성 검사 실패.")
+                
+                st.session_state.user_inputs = {
+                    'E_gpa': e_gpa_to_use, 'YS_mpa': ys_mpa_to_use, 'TS_mpa': ts_mpa_to_use,
+                    'HB': hb_to_use, 'nu': nu_to_use, 'Input_Mode': input_mode_str,
+                    'Composition_Details': current_composition
+                }
+                st.sidebar.success("조성 기반 물성치 예측 완료. 피로 거동 분석 진행.")
+
+            # Common prediction logic using *_to_use variables
+            e_mod_mpa_calc = e_gpa_to_use * 1000
+            st.session_state.user_inputs['E_mpa'] = e_mod_mpa_calc # Add E_mpa to user_inputs
+
+            # hb_to_pass handles None, NaN, or <=0 values for HB_val before model prediction
+            hb_for_model = hb_to_use 
+            if hb_to_use is None or np.isnan(hb_to_use) or hb_to_use <= 0:
+                 hb_for_model = np.nan # predict_fatigue_curves_hybrid will estimate if TS is valid
+
+            predicted_en_results = predict_fatigue_curves_hybrid(
+                e_gpa_to_use, ys_mpa_to_use, ts_mpa_to_use, hb_for_model,
+                model, scaler_X, scalers_y_dict, target_cols_list, device
+            )
+            st.session_state.en_results = predicted_en_results
+            
+            # Use hb_to_use for physics params (get_physics_params handles None/NaN/0 internally)
+            spf_phys, epf_phys, phys_method_name = get_physics_params(
+                hb_to_use, ts_mpa_to_use, e_mod_mpa_calc
+            )
+            st.session_state.physics_params = {
+                'spf_MPa_phys': spf_phys, 'epf_phys': epf_phys, 'method_name': phys_method_name
+            }
+
+            st.session_state.shear_results = convert_to_shear_parameters(
+                spf_prime=predicted_en_results['sigma_f_prime'],
+                b_fatigue=predicted_en_results['b_fatigue'],
+                epf_prime=predicted_en_results['epsilon_f_prime'],
+                c_fatigue=predicted_en_results['c_fatigue'],
+                E_gpa=e_gpa_to_use, TS_mpa=ts_mpa_to_use, nu=nu_to_use
+            )
+
+        except ValueError as ve: # Catches validation errors and others
+            st.sidebar.error(f"오류: {ve}")
+        except AttributeError as ae: # ctp module related
+            st.sidebar.error(f"조성 예측 모듈 오류: {ae}. 'composition_to_properties.py'를 확인하세요.")
+        except KeyError as ke: # ctp result dictionary key error
+            st.sidebar.error(f"조성 예측 결과 키 오류: {ke}. 'composition_to_properties.py' 반환 형식을 확인하세요.")
+        except Exception as e:
+            st.sidebar.error(f"예측 중 예기치 않은 오류 발생: {e}")
+
 
 # --- Main Area for Results ---
 if st.session_state.prediction_triggered and st.session_state.en_results:
-    # Create tabs: "모델 예측 파라미터", "인장 곡선 (E-N)", "전단 곡선 (γ-N)"
-    # "입력 요약" 탭 제거
-    tab_titles = ["피로 파라미터", "인장 곡선 (E-N)", "전단 곡선 (γ-N)"]
-    # if st.session_state.current_prediction_mode == 'shear' and st.session_state.shear_results: # 이 조건은 이제 항상 참이거나, shear_results 유무로 판단
-    # 항상 전단 탭을 만들도록 하되, 내용 표시는 shear_results 유무로 결정
-    
+    tab_titles = ["피로 파라미터 요약", "인장 곡선 (ϵ-N)", "전단 곡선 (γ-N)"]
     tabs = st.tabs(tab_titles)
 
-    # Tab 1: Predicted Parameters (기존 Tab 2의 내용 + 수식)
-    with tabs[0]:
-        st.subheader("인장 피로 파라미터 예측 결과")
-        en_params = st.session_state.en_results
-        phys_params = st.session_state.physics_params
+    with tabs[0]: # Parameter Summary Tab
+        st.subheader("피로 파라미터 요약")
+        en_p = st.session_state.en_results
+        phys_p = st.session_state.physics_params
+        shear_p = st.session_state.shear_results
+        user_p = st.session_state.user_inputs
+
+        st.write(f"**입력 모드:** {user_p.get('Input_Mode', 'N/A')}")
+        if user_p.get('Input_Mode') == "합금 조성비 입력 (wt%)":
+            with st.expander("입력된 합금 조성 상세"):
+                comp_details_df = pd.DataFrame(list(user_p.get('Composition_Details', {}).items()), columns=['Element', 'wt%'])
+                st.dataframe(comp_details_df)
         
+        st.markdown("#### AI 모델 예측 (인장)")
         col1, col2 = st.columns(2)
         with col1:
-            # method_name_display = phys_params.get('method_name', '경험식') # 삭제
-            # st.markdown(f"{method_name_display} 기반 σf'") # 삭제
-            st.metric(r"물리 식 계산 피로 강도 계수 ($\sigma_f'$, Calculated Fatigue Strength Coeff.)", f"{phys_params.get('spf_MPa_phys', np.nan):.2f} MPa", 
-                      help=f"입력된 HB값과 UTS를 사용하여 경험식으로 계산됩니다. (방법: {phys_params.get('method_name', 'N/A')})")
-            st.metric(r"피로 강도 계수 ($\sigma_f'$, Fatigue Strength Coefficient)", f"{en_params.get('sigma_f_prime', np.nan):.2f} MPa")
-            st.metric("피로 강도 지수 (b, Fatigue Strength Exponent)", f"{en_params.get('b_fatigue', np.nan):.4f}")
-
+            st.metric(r"$\sigma_f'$ (피로 강도 계수, Fatigue Strength Coeff.)", f"{en_p.get('sigma_f_prime', np.nan):.2f} MPa")
+            st.metric(r"$b$ (피로 강도 지수, Fatigue Strength Exponent)", f"{en_p.get('b_fatigue', np.nan):.4f}")
         with col2:
-            # method_name_display = phys_params.get('method_name', '경험식') # 삭제
-            # st.markdown(f"{method_name_display} 기반 εf'") # 삭제
-            st.metric(r"물리 식 계산 피로 연성 계수 ($\epsilon_f'$, Calculated Fatigue Ductility Coeff.)", f"{phys_params.get('epf_phys', np.nan):.4f}",
-                      help=f"입력된 HB값과 UTS, E를 사용하여 경험식으로 계산됩니다. (방법: {phys_params.get('method_name', 'N/A')})")
-            st.metric(r"피로 연성 계수 ($\epsilon_f'$, Fatigue Ductility Coefficient)", f"{en_params.get('epsilon_f_prime', np.nan):.4f}")
-            st.metric("피로 연성 지수 (c, Fatigue Ductility Exponent)", f"{en_params.get('c_fatigue', np.nan):.4f}")
+            st.metric(r"$\epsilon_f'$ (피로 연성 계수, Fatigue Ductility Coeff.)", f"{en_p.get('epsilon_f_prime', np.nan):.4f}")
+            st.metric(r"$c$ (피로 연성 지수, Fatigue Ductility Exponent)", f"{en_p.get('c_fatigue', np.nan):.4f}")
         
-        st.markdown("---_인장 Coffin-Manson 관계식_---")
-        st.latex(r"\frac{\Delta\epsilon}{2} = \frac{\sigma'_f}{E}\,(2N_f)^b + \epsilon'_f\,(2N_f)^c")
+        if phys_p and not (np.isnan(phys_p.get('spf_MPa_phys', np.nan)) and np.isnan(phys_p.get('epf_phys', np.nan))):
+            st.markdown(f"#### 물리 기반 경험식 ({phys_p.get('method_name', 'N/A')})")
+            col3, col4 = st.columns(2)
+            with col3:
+                st.metric(r"$\sigma_f'$ (계산값)", f"{phys_p.get('spf_MPa_phys', np.nan):.2f} MPa")
+            with col4:
+                st.metric(r"$\epsilon_f'$ (계산값)", f"{phys_p.get('epf_phys', np.nan):.4f}")
 
-        all_params_data = {
-            'Parameter': [
-                r"AI: 피로 강도 계수 ($\sigma_f'$, Fatigue Strength Coefficient, MPa)", 
-                "AI: 피로 강도 지수 (b, Fatigue Strength Exponent)",
-                r"AI: 피로 연성 계수 ($\epsilon_f'$, Fatigue Ductility Coefficient)", 
-                "AI: 피로 연성 지수 (c, Fatigue Ductility Exponent)",
-                r"Physics: 추정된 피로 강도 계수 ($\sigma_f'$, Estimated Fatigue Strength Coeff., MPa)", 
-                r"Physics: 추정된 피로 연성 계수 ($\epsilon_f'$, Estimated Fatigue Ductility Coeff.)",
-                "Physics: 사용된 경험식 방법 (Method)"
-            ],
-            'Value': [
-                f"{en_params.get('sigma_f_prime', np.nan):.2f}", 
-                f"{en_params.get('b_fatigue', np.nan):.4f}",
-                f"{en_params.get('epsilon_f_prime', np.nan):.4f}", 
-                f"{en_params.get('c_fatigue', np.nan):.4f}",
-                f"{phys_params.get('spf_MPa_phys', np.nan):.2f}", 
-                f"{phys_params.get('epf_phys', np.nan):.4f}",
-                str(phys_params.get('method_name', 'N/A'))
-            ]
-        }
-
-        # 전단 파라미터 및 수식 추가 (st.session_state.shear_results 유무에 따라)
-        if st.session_state.shear_results:
-            st.divider()
-            st.subheader("전단 피로 파라미터 변환")
-            shear_params = st.session_state.shear_results
-            s_col1, s_col2 = st.columns(2)
-            s_col1.metric(r"전단 피로 강도 계수 ($\tau_f'$, Shear Fatigue Strength Coeff.)", f"{shear_params.get('tauf_MPa', np.nan):.2f} MPa")
-            s_col1.metric(r"전단 피로 강도 지수 ($b_0$, Shear Fatigue Strength Exp.)", f"{shear_params.get('b0', np.nan):.4f}")
-            s_col2.metric(r"전단 피로 연성 계수 ($\gamma_f'$, Shear Fatigue Ductility Coeff.)", f"{shear_params.get('gammaf', np.nan):.4f}")
-            s_col2.metric(r"전단 피로 연성 지수 ($c_0$, Shear Fatigue Ductility Exp.)", f"{shear_params.get('c0', np.nan):.4f}")
-            st.caption(f"전단 변환 방법 (Conversion Method): {shear_params.get('conversion_method', 'N/A')}")
-            st.caption(f"계산된 전단 탄성 계수 (G, Shear Modulus): {shear_params.get('G_mpa', np.nan):.0f} MPa")
-            
-            st.markdown("---_전단 Coffin-Manson 관계식 (유사 형태)_---")
-            st.latex(r"\frac{\Delta\gamma}{2} = \frac{\tau'_f}{G}\,(2N_f)^{b_0} + \gamma'_f\,(2N_f)^{c_0}")
-
-            all_params_data['Parameter'].extend([
-                r"Shear: 전단 피로 강도 계수 ($\tau_f'$, Shear Fatigue Strength Coeff., MPa)", 
-                r"Shear: 전단 피로 강도 지수 ($b_0$, Shear Fatigue Strength Exp.)",
-                r"Shear: 전단 피로 연성 계수 ($\gamma_f'$, Shear Fatigue Ductility Coeff.)", 
-                r"Shear: 전단 피로 연성 지수 ($c_0$, Shear Fatigue Ductility Exp.)",
-                "Shear: 전단 변환 방법 (Conversion Method)", 
-                "Shear: 전단 탄성 계수 (G, Shear Modulus, MPa)"
+        if shear_p and not np.isnan(shear_p.get('tauf_MPa', np.nan)):
+            st.markdown(f"#### 전단 변환 결과 ({shear_p.get('conversion_method', 'N/A')})")
+            col5, col6 = st.columns(2)
+            with col5:
+                st.metric(r"$\tau_f'$ (전단 피로 강도 계수, Shear Fatigue Strength Coeff.)", f"{shear_p.get('tauf_MPa', np.nan):.2f} MPa")
+                st.metric(r"$\gamma_f'$ (전단 피로 연성 계수, Shear Fatigue Ductility Coeff.)", f"{shear_p.get('gammaf', np.nan):.4f}")
+                st.metric("$G$ (전단 탄성 계수, Shear Modulus)", f"{shear_p.get('G_mpa', np.nan):.0f} MPa")
+            with col6: # b0 and c0 are same as b and c
+                st.metric("$b_0$ (전단 피로 강도 지수, Shear Fatigue Strength Exponent)", f"{shear_p.get('b0', np.nan):.4f}")
+                st.metric("$c_0$ (전단 피로 연성 지수, Shear Fatigue Ductility Exponent)", f"{shear_p.get('c0', np.nan):.4f}")
+        
+        st.markdown("---")
+        st.markdown(r"**인장 Coffin-Manson:** $\frac{\Delta\epsilon}{2} = \frac{\sigma'_f}{E}\,(2N_f)^b + \epsilon'_f\,(2N_f)^c$")
+        if shear_p and not np.isnan(shear_p.get('tauf_MPa', np.nan)):
+             st.markdown(r"**전단 Coffin-Manson:** $\frac{\Delta\gamma}{2} = \frac{\tau'_f}{G}\,(2N_f)^{b_0} + \gamma'_f\,(2N_f)^{c_0}$")
+        
+        # Consolidate all parameters for download
+        all_params_list = [
+            ("Input Mode", user_p.get('Input_Mode', 'N/A')),
+            ("E (GPa, Input)", user_p.get('E_gpa', np.nan)),
+            ("YS (MPa, Input/Predicted)", user_p.get('YS_mpa', np.nan)),
+            ("TS (MPa, Input/Predicted)", user_p.get('TS_mpa', np.nan)),
+            ("HB (Input/Predicted)", user_p.get('HB', np.nan)),
+            ("HB (Model Input)", en_p.get('HB_processed_for_prediction', np.nan)),
+            ("ν (Input)", user_p.get('nu', np.nan)),
+            ("AI: σf' (MPa)", en_p.get('sigma_f_prime', np.nan)),
+            ("AI: b", en_p.get('b_fatigue', np.nan)),
+            ("AI: εf'", en_p.get('epsilon_f_prime', np.nan)),
+            ("AI: c", en_p.get('c_fatigue', np.nan)),
+        ]
+        if phys_p:
+            all_params_list.extend([
+                (f"Physics ({phys_p.get('method_name', 'N/A')}): σf' (MPa)", phys_p.get('spf_MPa_phys', np.nan)),
+                (f"Physics ({phys_p.get('method_name', 'N/A')}): εf'", phys_p.get('epf_phys', np.nan)),
             ])
-            all_params_data['Value'].extend([
-                f"{shear_params.get('tauf_MPa', np.nan):.2f}", 
-                f"{shear_params.get('b0', np.nan):.4f}",
-                f"{shear_params.get('gammaf', np.nan):.4f}", 
-                f"{shear_params.get('c0', np.nan):.4f}",
-                str(shear_params.get('conversion_method', 'N/A')), 
-                f"{shear_params.get('G_mpa', np.nan):.0f}"
+        if shear_p:
+            all_params_list.extend([
+                (f"Shear ({shear_p.get('conversion_method', 'N/A')}): τf' (MPa)", shear_p.get('tauf_MPa', np.nan)),
+                (f"Shear ({shear_p.get('conversion_method', 'N/A')}): b0", shear_p.get('b0', np.nan)),
+                (f"Shear ({shear_p.get('conversion_method', 'N/A')}): γf'", shear_p.get('gammaf', np.nan)),
+                (f"Shear ({shear_p.get('conversion_method', 'N/A')}): c0", shear_p.get('c0', np.nan)),
+                (f"Shear ({shear_p.get('conversion_method', 'N/A')}): G (MPa)", shear_p.get('G_mpa', np.nan)),
             ])
         
-        df_all_params = pd.DataFrame(all_params_data)
-        csv_all_params = df_all_params.to_csv(index=False).encode('utf-8')
+        df_all_params = pd.DataFrame(all_params_list, columns=['Parameter', 'Value'])
+        # Format float values
+        for col in df_all_params.columns:
+            if df_all_params[col].dtype == 'object': # Check if column might contain floats
+                try:
+                    df_all_params[col] = pd.to_numeric(df_all_params[col], errors='ignore')
+                except: pass # Ignore if conversion fails for mixed types like 'Parameter'
+        
+        float_cols = df_all_params.select_dtypes(include=np.number).columns
+        format_dict = {col: lambda x: f"{x:.4f}" if isinstance(x, float) and not np.isnan(x) else x for col in float_cols}
+
         st.download_button(
             label="모든 예측/계산 파라미터 CSV 다운로드",
-            data=csv_all_params,
+            data=df_all_params.to_csv(index=False, float_format='%.4f').encode('utf-8-sig'), # utf-8-sig for Excel
             file_name="predicted_fatigue_parameters.csv",
             mime='text/csv',
-            use_container_width=True # 버튼 폭 채우기
+            use_container_width=True
         )
 
-    # Tab 2: Tensile Curve (E-N) (기존 Tab 3)
-    with tabs[1]:
-        st.subheader("E-N (인장 변형률-수명) 곡선")
+    with tabs[1]: # Tensile Curve Tab
+        st.subheader("ϵ-N (인장 변형률-수명) 곡선")
         en_data = st.session_state.en_results
         fig_en, ax_en = plt.subplots(figsize=(10, 6))
         
-        reversals_en = en_data.get("Nf", np.array([]))
-        total_strain_en = en_data.get("total_strain_amplitude")
-        elastic_strain_en = en_data.get("elastic_strain_amplitude")
-        plastic_strain_en = en_data.get("plastic_strain_amplitude")
+        Nf_plot = en_data.get("Nf", np.array([])) * 2 # Plot against 2Nf (Reversals)
+        total_strain = en_data.get("total_strain_amplitude")
+        elastic_strain = en_data.get("elastic_strain_amplitude")
+        plastic_strain = en_data.get("plastic_strain_amplitude")
 
-        if total_strain_en is not None and not np.all(np.isnan(total_strain_en)):
-            ax_en.loglog(reversals_en, total_strain_en, '-', label='Total Strain (ε_a,pred)', linewidth=2)
-            if elastic_strain_en is not None: ax_en.loglog(reversals_en, elastic_strain_en, '--', label='Elastic Strain (pred)', alpha=0.8)
-            if plastic_strain_en is not None: ax_en.loglog(reversals_en, plastic_strain_en, ':', label='Plastic Strain (pred)', alpha=0.8)
+        plot_valid = False
+        if total_strain is not None and not np.all(np.isnan(total_strain)):
+            ax_en.loglog(Nf_plot, total_strain, '-', label='Total Strain (ε_a,pred)', linewidth=2)
+            if elastic_strain is not None: ax_en.loglog(Nf_plot, elastic_strain, '--', label='Elastic Strain (pred)', alpha=0.8)
+            if plastic_strain is not None: ax_en.loglog(Nf_plot, plastic_strain, ':', label='Plastic Strain (pred)', alpha=0.8)
+            plot_valid = True
             
+        if plot_valid:
             ax_en.set_xlabel('Reversals to Failure (2Nf)')
             ax_en.set_ylabel('Strain Amplitude (ε_a)')
             ax_en.legend()
             ax_en.grid(True, which="both", ls="-", alpha=0.7)
-            valid_strains = total_strain_en[~np.isnan(total_strain_en)]
+            valid_strains = total_strain[~np.isnan(total_strain)] # Use original total_strain for limits
             if len(valid_strains) > 0:
-                ax_en.set_ylim(bottom=max(1e-5, np.min(valid_strains) * 0.5), top=np.max(valid_strains) * 1.5)
+                ax_en.set_ylim(bottom=max(1e-5, np.min(valid_strains[valid_strains > 0]) * 0.5), top=np.max(valid_strains) * 1.5)
             else:
                 ax_en.set_ylim(bottom=1e-5)
             ax_en.set_title('Predicted E-N (Strain-Life) Curve')
@@ -597,153 +673,126 @@ if st.session_state.prediction_triggered and st.session_state.en_results:
             ax_en.text(0.5, 0.5, 'E-N Curve data not available or contains NaNs.', ha='center', va='center', transform=ax_en.transAxes)
             ax_en.set_title('Predicted E-N (Strain-Life) Curve (Data N/A)')
         
-        # st.latex(r"\\frac{\\Delta\\epsilon}{2} = \\frac{\\sigma'_f}{E}\\,(2N_f)^b + \\epsilon'_f\\,(2N_f)^c") # 파라미터 탭으로 이동
         st.pyplot(fig_en)
 
-        # Download buttons for E-N curve
         df_en_curve = pd.DataFrame({
-            '2Nf': reversals_en,
-            'Total_Strain_Amplitude': total_strain_en,
-            'Elastic_Strain_Amplitude': elastic_strain_en,
-            'Plastic_Strain_Amplitude': plastic_strain_en,
+            'Reversals_2Nf': Nf_plot,
+            'Total_Strain_Amplitude': total_strain,
+            'Elastic_Strain_Amplitude': elastic_strain,
+            'Plastic_Strain_Amplitude': plastic_strain,
             'Stress_Amplitude_MPa': en_data.get("stress_amplitude")
         })
-        csv_en_curve = df_en_curve.to_csv(index=False).encode('utf-8')
+        csv_en_curve = df_en_curve.to_csv(index=False, float_format='%.5e').encode('utf-8-sig')
         
         img_en_buf = io.BytesIO()
         fig_en.savefig(img_en_buf, format="png", dpi=300)
         img_en_buf.seek(0)
 
-        dl_col1, dl_col2 = st.columns(2)
-        with dl_col1:
-            st.download_button(label="E-N 곡선 데이터 (CSV) 다운로드", data=csv_en_curve, file_name="en_curve_data.csv", mime="text/csv", use_container_width=True)
-        with dl_col2:
-            st.download_button(label="E-N 곡선 이미지 (PNG) 다운로드", data=img_en_buf, file_name="en_curve_plot.png", mime="image/png", use_container_width=True)
+        dl_col1_en, dl_col2_en = st.columns(2)
+        with dl_col1_en:
+            st.download_button(label="E-N 곡선 데이터 (CSV) 다운로드", data=csv_en_curve, file_name="en_curve_data.csv", mime="text/csv", use_container_width=True, disabled=not plot_valid)
+        with dl_col2_en:
+            st.download_button(label="E-N 곡선 이미지 (PNG) 다운로드", data=img_en_buf, file_name="en_curve_plot.png", mime="image/png", use_container_width=True, disabled=not plot_valid)
 
         with st.expander("E-N 곡선 수치 데이터 보기"):
-            if not df_en_curve.empty:
-                # 숫자 형식 지정 (예: 소수점 4자리 또는 과학적 표기법)
-                st.dataframe(df_en_curve.style.format({
-                    col: '{:.4e}' for col in df_en_curve.columns if df_en_curve[col].dtype == 'float'
-                }))
+            if plot_valid and not df_en_curve.empty:
+                st.dataframe(df_en_curve.style.format("{:.4e}"))
             else:
                 st.write("표시할 E-N 곡선 데이터가 없습니다.")
 
-    # Tab 3: Shear Curve (Gamma-N) - Conditional (기존 Tab 4)
-    # 전단 결과는 항상 계산되므로, st.session_state.shear_results 유무로 표시 결정
-    if st.session_state.shear_results:
-        with tabs[2]: # 탭 인덱스 수정 (0, 1, 2)
-            st.subheader("Gamma-N (전단 변형률-수명) 곡선")
-            shear_data = st.session_state.shear_results
-            en_base_data = st.session_state.en_results 
-            
-            fig_gn, ax_gn = plt.subplots(figsize=(10, 6))
-            reversals_gn = en_base_data.get("Nf", np.array([])) 
+    with tabs[2]: # Shear Curve Tab
+        st.subheader("γ-N (전단 변형률-수명) 곡선")
+        shear_results_gn = st.session_state.shear_results
+        en_base_data_gn = st.session_state.en_results # For Nf
+        
+        fig_gn, ax_gn = plt.subplots(figsize=(10, 6))
+        plot_valid_gn = False
+        df_gn_curve_plot = pd.DataFrame() # Initialize
 
-            tauf_prime = shear_data.get('tauf_MPa')
-            gammaf_prime = shear_data.get('gammaf')
-            b0 = shear_data.get('b0')
-            c0 = shear_data.get('c0')
-            G_mpa = shear_data.get('G_mpa')
+        if shear_results_gn and en_base_data_gn:
+            Nf_gn_plot = en_base_data_gn.get("Nf", np.array([])) * 2 # Reversals (2Nf)
 
-            if all(val is not None and not np.isnan(val) for val in [tauf_prime, gammaf_prime, b0, c0, G_mpa]) and G_mpa > 0:
-                elastic_shear_strain_gn = (tauf_prime / G_mpa) * (reversals_gn ** b0)
-                plastic_shear_strain_gn = gammaf_prime * (reversals_gn ** c0)
+            tauf_prime = shear_results_gn.get('tauf_MPa')
+            gammaf_prime = shear_results_gn.get('gammaf')
+            b0 = shear_results_gn.get('b0')
+            c0 = shear_results_gn.get('c0')
+            G_mpa = shear_results_gn.get('G_mpa')
+
+            if all(val is not None and not np.isnan(val) for val in [tauf_prime, gammaf_prime, b0, c0, G_mpa]) and G_mpa > 0 and len(Nf_gn_plot) > 0:
+                el_shear_strain = (tauf_prime / G_mpa) * (Nf_gn_plot / 2)**b0 # Nf_gn_plot is 2Nf, formula uses Nf or 2Nf depending on b0 def. Assuming b0 is for 2Nf.
+                pl_shear_strain = gammaf_prime * (Nf_gn_plot / 2)**c0         # Let's assume b0, c0 are for Nf (cycles)
+                                                                              # Original code used reversals_gn_plot ** b0_gn which was Nf.
+                                                                              # The Coffin-Manson is usually (2Nf)^b or (Nf)^b.
+                                                                              # The plot X-axis is 2Nf.
+                                                                              # If b,c are for 2Nf: (tau_f'/G)*(2Nf)^b + gamma_f'*(2Nf)^c
+                                                                              # If b,c are for Nf: (tau_f'/G)*(Nf)^b + gamma_f'*(Nf)^c
+                                                                              # The E-N curve used (2*Nf)**b. So shear should be consistent.
+                
+                # Assuming b0, c0 are exponents for 2Nf (reversals)
+                elastic_shear_strain_gn = (tauf_prime / G_mpa) * (Nf_gn_plot)**b0
+                plastic_shear_strain_gn = gammaf_prime * (Nf_gn_plot)**c0
                 total_shear_strain_gn = elastic_shear_strain_gn + plastic_shear_strain_gn
                 
-                ax_gn.loglog(reversals_gn, total_shear_strain_gn, '-', label='Total Shear Strain (γ_a,pred)', linewidth=2)
-                ax_gn.loglog(reversals_gn, elastic_shear_strain_gn, '--', label='Elastic Shear Strain (pred)', alpha=0.8)
-                ax_gn.loglog(reversals_gn, plastic_shear_strain_gn, ':', label='Plastic Shear Strain (pred)', alpha=0.8)
+                ax_gn.loglog(Nf_gn_plot, total_shear_strain_gn, '-', label='Total Shear Strain (γ_a,pred)', linewidth=2)
+                ax_gn.loglog(Nf_gn_plot, elastic_shear_strain_gn, '--', label='Elastic Shear Strain (pred)', alpha=0.8)
+                ax_gn.loglog(Nf_gn_plot, plastic_shear_strain_gn, ':', label='Plastic Shear Strain (pred)', alpha=0.8)
+                plot_valid_gn = True
 
-                ax_gn.set_xlabel('Reversals to Failure (2Nf)')
-                ax_gn.set_ylabel('Shear Strain Amplitude (γ_a)')
-                ax_gn.legend()
-                ax_gn.grid(True, which="both", ls="-", alpha=0.7)
-                valid_strains_gn = total_shear_strain_gn[~np.isnan(total_shear_strain_gn)]
-                if len(valid_strains_gn) > 0:
-                     ax_gn.set_ylim(bottom=max(1e-5, np.min(valid_strains_gn) * 0.5), top=np.max(valid_strains_gn) * 1.5)
-                else:
-                    ax_gn.set_ylim(bottom=1e-5)
-                ax_gn.set_title('Predicted Gamma-N (Shear Strain-Life) Curve')
-                st.caption(f"전단 변환 방법: {shear_data.get('conversion_method', 'N/A')}") # 변환 방법은 여기에 유지
+                df_gn_curve_plot = pd.DataFrame({
+                    'Reversals_2Nf': Nf_gn_plot,
+                    'Total_Shear_Strain_Amplitude': total_shear_strain_gn,
+                    'Elastic_Shear_Strain_Amplitude': elastic_shear_strain_gn,
+                    'Plastic_Shear_Strain_Amplitude': plastic_shear_strain_gn
+                })
+        
+        if plot_valid_gn:
+            ax_gn.set_xlabel('Reversals to Failure (2Nf)')
+            ax_gn.set_ylabel('Shear Strain Amplitude (γ_a)')
+            ax_gn.legend()
+            ax_gn.grid(True, which="both", ls="-", alpha=0.7)
+            valid_strains_gn = df_gn_curve_plot['Total_Shear_Strain_Amplitude'].dropna()
+            if not valid_strains_gn.empty:
+                 ax_gn.set_ylim(bottom=max(1e-5, valid_strains_gn[valid_strains_gn > 0].min() * 0.5), top=valid_strains_gn.max() * 1.5)
             else:
-                ax_gn.text(0.5, 0.5, 'Gamma-N Curve data not available or contains NaNs.', ha='center', va='center', transform=ax_gn.transAxes)
-                ax_gn.set_title('Predicted Gamma-N (Shear Strain-Life) Curve (Data N/A)')
-                st.warning("전단 피로 파라미터 계산에 실패했거나 전단 탄성 계수가 0 또는 NaN이므로 Gamma-N 곡선을 생성할 수 없습니다.")
+                ax_gn.set_ylim(bottom=1e-5)
+            ax_gn.set_title('Predicted γ-N (Shear Strain-Life) Curve')
+            st.caption(f"전단 변환 방법: {shear_results_gn.get('conversion_method', 'N/A')}")
+        else:
+            ax_gn.text(0.5, 0.5, 'γ-N Curve data not available or parameters invalid.', ha='center', va='center', transform=ax_gn.transAxes)
+            ax_gn.set_title('Predicted γ-N (Shear Strain-Life) Curve (Data N/A)')
+            if not shear_results_gn or np.isnan(shear_results_gn.get('G_mpa', np.nan)) or shear_results_gn.get('G_mpa', 0) <=0 :
+                 st.warning("전단 피로 파라미터 계산에 실패했거나 전단 탄성 계수(G)가 유효하지 않아 γ-N 곡선을 생성할 수 없습니다.")
+        
+        st.pyplot(fig_gn)
 
-            # st.latex(r"\\frac{\\Delta\\gamma}{2} = \\frac{\\tau'_f}{G}\\,(2N_f)^{b_0} + \\gamma'_f\\,(2N_f)^{c_0}") # 파라미터 탭으로 이동
-            st.pyplot(fig_gn)
+        csv_gn_curve = df_gn_curve_plot.to_csv(index=False, float_format='%.5e').encode('utf-8-sig')
+        img_gn_buf = io.BytesIO()
+        fig_gn.savefig(img_gn_buf, format="png", dpi=300)
+        img_gn_buf.seek(0)
 
-            # Download buttons for Gamma-N curve
-            # total_shear_strain_gn 등이 계산되지 않았을 수 있으므로 확인 후 DataFrame 생성
-            df_gn_data_to_save = {}
-            if 'total_shear_strain_gn' in locals() and total_shear_strain_gn is not None:
-                df_gn_data_to_save['Total_Shear_Strain_Amplitude'] = total_shear_strain_gn
-            if 'elastic_shear_strain_gn' in locals() and elastic_shear_strain_gn is not None:
-                df_gn_data_to_save['Elastic_Shear_Strain_Amplitude'] = elastic_shear_strain_gn
-            if 'plastic_shear_strain_gn' in locals() and plastic_shear_strain_gn is not None:
-                df_gn_data_to_save['Plastic_Shear_Strain_Amplitude'] = plastic_shear_strain_gn
-            
-            if df_gn_data_to_save: # 데이터가 하나라도 있으면
-                df_gn_data_to_save['2Nf'] = reversals_gn # 2Nf는 항상 있음
-                df_gn_curve = pd.DataFrame(df_gn_data_to_save)
-                # 컬럼 순서 재정의 (2Nf가 맨 앞으로 오도록)
-                cols_order = ['2Nf'] + [col for col in df_gn_data_to_save if col != '2Nf']
-                df_gn_curve = df_gn_curve[cols_order]
-                csv_gn_curve = df_gn_curve.to_csv(index=False).encode('utf-8')
-                gn_csv_disabled = False
+        dl_gn_col1, dl_gn_col2 = st.columns(2)
+        with dl_gn_col1:
+            st.download_button(label="γ-N 곡선 데이터 (CSV) 다운로드", data=csv_gn_curve, file_name="gamma_n_curve_data.csv", mime="text/csv", use_container_width=True, disabled=not plot_valid_gn)
+        with dl_gn_col2:
+            st.download_button(label="γ-N 곡선 이미지 (PNG) 다운로드", data=img_gn_buf, file_name="gamma_n_curve_plot.png", mime="image/png", use_container_width=True, disabled=not plot_valid_gn)
+
+        with st.expander("γ-N 곡선 수치 데이터 보기"):
+            if plot_valid_gn and not df_gn_curve_plot.empty:
+                 st.dataframe(df_gn_curve_plot.style.format("{:.4e}"))
             else:
-                csv_gn_curve = pd.DataFrame().to_csv(index=False).encode('utf-8')
-                gn_csv_disabled = True
+                st.write("표시할 γ-N 곡선 데이터가 없습니다.")
+else:
+    st.info('👈 사이드바에서 입력 모드를 선택하고, 필요한 값을 입력한 후 "피로 거동 예측 실행" 버튼을 누르세요.')
 
-            img_gn_buf = io.BytesIO()
-            fig_gn.savefig(img_gn_buf, format="png", dpi=300)
-            img_gn_buf.seek(0)
-            
-            dl_gn_col1, dl_gn_col2 = st.columns(2)
-            with dl_gn_col1:
-                st.download_button(label="Gamma-N 곡선 데이터 (CSV) 다운로드", data=csv_gn_curve, file_name="gamma_n_curve_data.csv", mime="text/csv",
-                                   disabled=gn_csv_disabled, use_container_width=True)
-            with dl_gn_col2:
-                st.download_button(label="Gamma-N 곡선 이미지 (PNG) 다운로드", data=img_gn_buf, file_name="gamma_n_curve_plot.png", mime="image/png", use_container_width=True)
-            
-            with st.expander("Gamma-N 곡선 수치 데이터 보기"):
-                # df_gn_curve는 이미 위에서 생성되었거나 빈 DataFrame임
-                if not csv_gn_curve == pd.DataFrame().to_csv(index=False).encode('utf-8'): # gn_csv_disabled 대신 csv 내용으로 확인
-                    # df_gn_curve를 다시 만들거나, 이미 있는 df_gn_curve를 사용
-                    # 위에서 df_gn_curve가 비어있을 수 있으므로, 여기서 다시 만들거나, 안전하게 접근
-                    if 'df_gn_curve' in locals() and not df_gn_curve.empty:
-                         st.dataframe(df_gn_curve.style.format({
-                            col: '{:.4e}' for col in df_gn_curve.columns if df_gn_curve[col].dtype == 'float'
-                        }))
-                    elif df_gn_data_to_save: # df_gn_data_to_save로 DataFrame을 만들 수 있다면
-                        temp_df_gn = pd.DataFrame(df_gn_data_to_save)
-                        cols_order_temp = ['2Nf'] + [col for col in df_gn_data_to_save if col != '2Nf']
-                        temp_df_gn = temp_df_gn[cols_order_temp]
-                        st.dataframe(temp_df_gn.style.format({
-                            col: '{:.4e}' for col in temp_df_gn.columns if temp_df_gn[col].dtype == 'float'
-                        }))
-                    else:
-                        st.write("표시할 Gamma-N 곡선 데이터가 없습니다 (계산 실패 또는 데이터 없음).")
-                else:
-                    st.write("표시할 Gamma-N 곡선 데이터가 없습니다.")
-    
-    # 만약 shear_results가 없으면 (예외 발생 등) 전단 탭을 표시하지 않거나, 오류 메시지만 표시할 수 있음
-    # 현재 로직에서는 tabs[2]가 항상 전단 탭이므로, shear_results가 없을 경우 위에서 내용이 안그려짐
-
-elif not st.session_state.prediction_triggered:
-    st.info('👈 사이드바에서 재료 물성치를 입력하고, 예측 버튼을 누르세요.') # 문구 수정됨
-
-st.divider() # 시각적 구분을 위한 선 추가
+st.divider()
 st.markdown(
     """
     <div style="text-align: center; color: grey; font-size: 0.8em;">
-        © 2025 YeoJoon Yoon. All Rights Reserved.<br>
+        © 2024 YeoJoon Yoon. All Rights Reserved.<br>
         Contact: <a href="mailto:goat@sogang.ac.kr">goat@sogang.ac.kr</a>
     </div>
     """,
     unsafe_allow_html=True
 )
 
-# 앱 실행 안내 (터미널에서 직접 실행 시 필요)
-# streamlit run FatiguePredictor0528.py
+# streamlit run FatiguePredictor0529.py
