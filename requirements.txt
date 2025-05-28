@@ -4,3 +4,4 @@ matplotlib
 torch>=1.13.0
 joblib
 pandas
+sklearn
