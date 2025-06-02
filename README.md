@@ -85,7 +85,7 @@ Ensure the following files are in the working directory:
 ```
 .
 ├── FatiguePredictor.py        	      # Main web app
-├── main.ipynb               		      # Training notebook
+├── main.ipynb                        # Training notebook
 ├── composition_to_properties.py      # Alloy composition → static property model
 ├── best_fatigue_pinn_model.pth       # Trained model weights
 ├── scaler_X.pkl                      # Input scaler
