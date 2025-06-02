@@ -1,207 +1,175 @@
 # 🚀 Advanced Fatigue Life Predictor
 
-Predict tensile (ε–N) and shear (γ–N) fatigue life curves from simple material properties or alloy composition using a physics-guided machine learning model.
+A machine learning-based system to predict **tensile (ε–N)** and **shear (γ–N)** fatigue life curves using either **basic material properties** or **alloy composition** — guided by physical principles.
 
-🌐 **[👉 Try the Live Web App](https://fatigue-life-prediction-6zfzg2ae9wdtnan3cutbyi.streamlit.app/)** *(Note: Link might point to an older version if not updated recently)*
-
----
-
-## 📖 Overview
-
-This project presents an advanced fatigue life prediction system. It leverages a Physics-Informed Neural Network (PINN) to estimate strain-life (ε–N) and shear strain-life (γ–N) behavior for metallic materials. Users can input either standard monotonic tensile properties or the alloy's chemical composition to obtain fatigue life predictions.
-
-**Key Features:**
-- **Dual Input Modes:**
-    - **Monotonic Properties:** Input E, YS, TS, HB, and Poisson's ratio.
-    - **Alloy Composition:** Input wt% of key alloying elements (e.g., C, Mn, Cr, Mo, P, S) to internally estimate monotonic properties.
-- Predicts key fatigue parameters: σ′f, b, ε′f, c (tensile).
-- Derives shear fatigue parameters (τ′f, b₀, γ′f, c₀) using established conversion methods.
-- Generates and visualizes both tensile (ε–N) and shear (γ–N) fatigue curves.
-- Employs a hybrid loss function: data-driven for some parameters, physics-guided (e.g., Hardness Method) for others, and incorporates the Coffin-Manson relation.
-- User-friendly Streamlit web application for interactive predictions.
+🌐 [**▶ Try the Live Web App**](https://fatigue-life-prediction-6zfzg2ae9wdtnan3cutbyi.streamlit.app/)  
+*(Note: The latest version may differ depending on deployment status.)*
 
 ---
 
-## 📦 How to Run Locally
+## 📌 Overview
+
+This project implements a **Physics-Informed Neural Network (PINN)** to estimate fatigue life behavior of metallic materials. Users can choose between two input modes:
+
+- **Monotonic Properties**: E, YS, TS, HB, ν
+- **Alloy Composition**: Elemental wt% (e.g., C, Mn, Cr, Mo, P, S)
+
+Based on these, the model predicts:
+
+- **Tensile fatigue parameters**: σ′<sub>f</sub>, b, ε′<sub>f</sub>, c
+- **Shear fatigue parameters**: τ′<sub>f</sub>, b₀, γ′<sub>f</sub>, c₀ (via TS-dependent conversion)
+
+It generates and visualizes fatigue curves:
+- ε–N curve (tensile)
+- γ–N curve (shear)
+
+### 🔧 Core Features
+- Dual input modes: **static properties** or **chemical composition**
+- PINN model combining **data-driven learning** and **physics-based constraints**
+- UTS-based **tensile-to-shear transformation strategy**
+- Streamlit-powered **interactive web interface**
+- Real-time curve generation and visualization
+
+---
+
+## ⚙️ Local Installation
 
 ### 1. Clone the Repository
 ```bash
 git clone https://github.com/dumbbellcollector/fatigue-life-predictor.git
 cd fatigue-life-predictor
-'''
-2. Install Required Libraries
+```
 
-Ensure you have Python 3.8+ installed. Then, install the dependencies:
+### 2. Install Dependencies
+Python 3.8+ is required. Install libraries via pip:
 
+```bash
 pip install -r requirements.txt
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Bash
-IGNORE_WHEN_COPYING_END
+```
 
-Required libraries:
+Key packages:
+- `streamlit>=1.25`
+- `torch>=2.0`
+- `joblib`, `numpy`, `pandas`, `matplotlib`, `scikit-learn`
 
-streamlit>=1.25
-
-torch>=2.0
-
-joblib
-
-numpy
-
-pandas
-
-matplotlib
-
-scikit-learn
-
-3. Run the Streamlit App
-
-Navigate to the directory containing the app script and run:
-
+### 3. Run the App
+```bash
 streamlit run FatiguePredictor0529.py
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Bash
-IGNORE_WHEN_COPYING_END
+```
+Ensure the following files are in the working directory:
+- `best_fatigue_pinn_model.pth`
+- `scaler_X.pkl`
+- `scaler_y.pkl`
+- `composition_to_properties.py`
 
-(Replace FatiguePredictor0529.py with the latest main application script name if different.)
+---
 
-⚡ Ensure the following files are present in the same directory as the Streamlit app script:
+## 💻 Demo Snapshots
 
-best_fatigue_pinn_model.pth (Trained PyTorch model weights)
+### 🔹 Input Modes
 
-scaler_X.pkl (Scaler for input features)
+| Static Property Mode | Alloy Composition Mode |
+|----------------------|------------------------|
+| ![Monotonic Input](images/monotonic_input.png) | ![Composition Input](images/composition_input.png) |
 
-scaler_y.pkl (Scaler for target fatigue parameters)
+### 🔹 Example Output Curves
 
-composition_to_properties.py (Module for calculating properties from composition)
+| Tensile (ε–N) | Shear (γ–N) |
+|---------------|-------------|
+| ![Tensile Curve](images/tensile_example.png) | ![Shear Curve](images/shear_example.png) |
 
-📈 Quick Demo
+---
 
-Input Modes:
+## 📁 File Structure
 
-Monotonic Properties Input	Alloy Composition Input
-
-![alt text]([Link_to_Monotonic_Input_Image.png])
-	
-![alt text]([Link_to_Composition_Input_Image.png])
-
-Example Output Curves:
-
-Tensile Mode (ε–N)	Shear Mode (γ–N)
-
-![alt text]([Link_to_Tensile_Example_Image.png])
-	
-![alt text]([Link_to_Shear_Example_Image.png])
-
-(Please replace [Link_to_..._Image.png] with actual paths to your demo images in the repository.)
-
-🛠️ File Structure
+```
 .
-├── FatiguePredictor0529.py         # Main Streamlit GUI application script
-├── composition_to_properties.py    # Module for property estimation from composition
-├── main0526Nfplot.ipynb            # Jupyter Notebook for model training and evaluation
-├── best_fatigue_pinn_model.pth     # Trained model weights
-├── scaler_X.pkl                    # Input feature scaler
-├── scaler_y.pkl                    # Output target scaler (contains scalers and target_cols list)
-├── requirements.txt                # Python dependencies
-├── images/                           # (Optional) Directory for demo images
-└── README.md                       # This README file
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-Text
-IGNORE_WHEN_COPYING_END
-🔥 Model & Application Highlights
+├── FatiguePredictor.py    	      # Main web app
+├── main0527.ipynb   		      # Training notebook
+├── composition_to_properties.py      # Alloy composition → static property model
+├── best_fatigue_pinn_model.pth       # Trained model weights
+├── scaler_X.pkl                      # Input scaler
+├── scalers_y.pkl                     # Output scaler
+├── requirements.txt                  # Package list
+├── images/                           # Demo images
+└── README.md                         # This file
+```
 
-Hybrid PINN Approach: Combines data-driven learning with physics-based regularization (e.g., Coffin-Manson relation, empirical hardness methods for specific parameters).
+---
 
-Flexible Input: Accepts either direct monotonic properties or alloy composition for broader usability.
+## 🔬 Model Highlights
 
-Comprehensive Output: Provides key tensile and shear fatigue parameters along with full ε–N and γ–N curves.
+- **PINN Framework**: Combines MSE loss with physics-based terms (e.g., Coffin-Manson consistency)
+- **Flexible Input**: Predict from measured properties or chemical composition
+- **Shear Fatigue Estimation**: Uses UTS thresholds to apply von Mises, max principal, or interpolation
+- **Scatter Band Evaluation**: Accuracy benchmarked using 2× scatter band inclusion rate
+- **Interactive GUI**: Visualize fatigue curves instantly from browser
 
-Shear Parameter Conversion: Implements UTS-dependent criteria (von Mises, Max Principal, Interpolation) for robust shear fatigue estimation.
+---
 
-Accuracy Benchmarking: Performance evaluated against established empirical methods using metrics like 2x scatter band inclusion rate.
+## 📊 Changelog
 
-Interactive GUI: Streamlit application allows for easy input, real-time predictions, and visualization.
+| Date | Updates |
+|------|---------|
+| 2024.05.29 | New: Composition-based input mode; added `composition_to_properties.py`; UI update |
+| 2024.05.14 | Reverted to partially data-driven estimation for select parameters |
+| 2024.05.08 | Experimented with traditional physics-based estimation inside loss |
+| 2024.04.27 | Improved shear parameter conversion based on TS; GUI enhancement |
+| 2024.04.14 | Extended to predict both tensile and shear fatigue curves |
+| 2024.04.11 | Migrated from TensorFlow to PyTorch; GUI development initiated |
+| 2024.03.31 | Initial development (TensorFlow); added basic physics constraints |
 
-🕓 Changelog
-Date	Update Summary
-2024.05.29+	Implemented "Alloy Composition Input" mode, enabling fatigue prediction directly from chemical composition. Added composition_to_properties.py module. Enhanced UI for new input mode. (Ongoing refinement)
-2024.05.14	Reverted to a primarily data-driven approach for some parameters after evaluating a more heavily physics-constrained model.
-2024.05.08	Experimented with incorporating traditional fatigue parameter estimation methods (Hardness Method, Universal Slope Method) more directly into the loss function.
-2024.04.27	Improved prediction accuracy by refining shear conversion logic based on Tensile Strength (TS); enhanced Streamlit app GUI.
-2024.04.14	Extended model to predict both tensile and shear fatigue life.
-2024.04.11	Migrated model from TensorFlow to PyTorch; initiated Streamlit-based GUI development.
-2024.03.31	Initial development started with TensorFlow. Physics constraints primarily focused on 'b' and 'c' parameter ranges.
+---
 
-(Note: Dates are assumed to be YYYY.MM.DD for consistency. Please adjust if your convention is different.)
+## 📈 Progress & Accuracy
 
-🌟 Current Progress & Accuracy
+- ✅ PINN model validated on 600+ material samples
+- ✅ Tensile and shear fatigue curve generation available
+- ✅ 2Nf prediction accuracy: **66.7% within 2× scatter band**
+- ⚠️ **ε′<sub>f</sub>** prediction remains challenging due to nonlinear data spread
 
-✅ PINN model successfully trained and validated for predicting tensile fatigue parameters from monotonic properties.
+---
 
-✅ Streamlit GUI operational for both "Monotonic Properties Input" and "Alloy Composition Input" modes.
+## 🧪 Ongoing & Future Work
 
-✅ Generation of tensile (ε–N) and shear (γ–N) fatigue curves with component breakdown (elastic/plastic).
+### ✅ Current
+- Further refinement of `Alloy Composition Input` mode
+- Improving prediction accuracy for ε′<sub>f</sub>
 
-✅ Achieved a 2x scatter band inclusion rate of 66.7% for fatigue life (2Nf) prediction (monotonic property mode) across diverse steel grades, comparable to or exceeding conventional empirical methods for specific alloy families.
+### 🔜 Upcoming
+- Upload and compare user experimental fatigue data
+- Batch prediction for multiple materials
+- Enhanced property estimation (composition → HB, YS, TS)
+- Uncertainty quantification & confidence intervals
+- Public API access
 
-🚧 Ongoing:
+---
 
-Further refinement of the "Alloy Composition Input" mode, including validation of the composition-to-property estimation accuracy.
+## 🤝 Contributions Welcome!
 
-Improvement of ε'f (fatigue ductility coefficient) prediction accuracy.
+Ways to help:
+- Extend material database
+- Improve model accuracy or generalization
+- Suggest/implement new fatigue transformations
+- Enhance UI/UX or documentation
 
-🚧 Future:
+---
 
-Allow users to upload experimental S-N or ε-N data for comparison or model fine-tuning.
+## 📄 License
 
-Implement batch prediction capabilities for analyzing multiple materials or compositions simultaneously.
+MIT License. See [`LICENSE`](LICENSE) for details.
 
-✨ Future Directions
+---
 
-Advanced Compositional Effects: Incorporate more sophisticated models for predicting monotonic properties from alloy composition, potentially including interaction terms and effects of minor elements or heat treatment (if data becomes available).
+## 📢 Acknowledgements
 
-Uncertainty Quantification: Provide an estimation of uncertainty or confidence intervals for the predicted fatigue life.
+This project is part of ongoing academic research into data-efficient, physics-consistent fatigue design tools.  
+Special thanks to R. Basan (2024) for benchmark methodology.
 
-Expanded Material Database: Train the model on a wider range of metallic materials beyond steels.
+---
 
-Public API: Develop and deploy a public API for programmatic access to the fatigue life prediction service.
+## 📬 Contact
 
-🤝 Contributions
-
-Pull requests, suggestions, and issues are highly welcome! Feel free to contribute by:
-
-Improving the accuracy or robustness of the prediction models.
-
-Enhancing the user interface and experience.
-
-Expanding the documentation or adding more examples.
-
-Adding support for new materials or features.
-
-📜 License
-
-This project is licensed under the MIT License. See the LICENSE file for more details (if you add one).
-
-📢 Acknowledgement
-
-This project is part of ongoing research aimed at leveraging machine learning and physics-based knowledge to accelerate and improve the accuracy of fatigue design and material selection processes. We acknowledge the work of R. Basan (2024) for providing a valuable benchmark for conventional methods.
-
-📫 Contact
-
-For questions, collaboration, or discussions, please feel free to reach out:
-
-YeoJoon Yoon
-
-Email: [goat@sogang.ac.kr]
-
-GitHub: dumbbellcollector
+**YeoJoon Yoon**  
+📧 Email: goat@sogang.ac.kr  
+🐙 GitHub: [dumbbellcollector](https://github.com/dumbbellcollector)
