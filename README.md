@@ -59,7 +59,7 @@ streamlit run FatiguePredictor0529.py
 Ensure the following files are in the working directory:
 - `best_fatigue_pinn_model.pth`
 - `scaler_X.pkl`
-- `scaler_y.pkl`
+- `scalers_y.pkl`
 - `composition_to_properties.py`
 
 ---
@@ -84,8 +84,8 @@ Ensure the following files are in the working directory:
 
 ```
 .
-├── FatiguePredictor.py    	      # Main web app
-├── main0527.ipynb   		      # Training notebook
+├── FatiguePredictor.py        	      # Main web app
+├── main.ipynb               		      # Training notebook
 ├── composition_to_properties.py      # Alloy composition → static property model
 ├── best_fatigue_pinn_model.pth       # Trained model weights
 ├── scaler_X.pkl                      # Input scaler
