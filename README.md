@@ -28,7 +28,7 @@ This project presents an advanced fatigue life prediction system. It leverages a
 ```bash
 git clone https://github.com/dumbbellcollector/fatigue-life-predictor.git
 cd fatigue-life-predictor
-
+'''
 2. Install Required Libraries
 
 Ensure you have Python 3.8+ installed. Then, install the dependencies:
