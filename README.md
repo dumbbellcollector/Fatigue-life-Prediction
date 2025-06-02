@@ -66,11 +66,11 @@ Ensure the following files are in the working directory:
 
 ## 💻 Demo Snapshots
 
-### 🔹 Input Modes
+### 🔹 Model Accuracy
 
-| Static Property Mode | Alloy Composition Mode |
+| Fatigue Parameters | Load Reversals(2N_f) |
 |----------------------|------------------------|
-| ![Monotonic Input](images/monotonic_input.png) | ![Composition Input](images/composition_input.png) |
+| ![Fatigue Parameters](images/fatigueParametersAcc.png) | ![2N_f](images/2NfAcc.png) |
 
 ### 🔹 Example Output Curves
 
