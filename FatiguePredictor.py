@@ -788,7 +788,7 @@ st.divider()
 st.markdown(
     """
     <div style="text-align: center; color: grey; font-size: 0.8em;">
-        © 2024 YeoJoon Yoon. All Rights Reserved.<br>
+        © 2025 YeoJoon Yoon. All Rights Reserved.<br>
         Contact: <a href="mailto:goat@sogang.ac.kr">goat@sogang.ac.kr</a>
     </div>
     """,
